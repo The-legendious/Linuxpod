@@ -816,7 +816,7 @@ window), and background results are handled in short slices.
 If the app ever closes unexpectedly, look in
 `~/.local/share/linuxpod/`: Python errors are in `app.log`,
 and anything printed to the terminal (X errors, hard-crash stack dumps)
-is in `crash.log`. Run with `MUSIC_MANAGER_STDERR=terminal` to keep
+is in `crash.log`. Run with `LINUXPOD_STDERR=terminal` to keep
 those messages in the terminal instead.
 
 ## AppImage
@@ -1011,23 +1011,7 @@ Songs with no track number get one filled in from a number at the start of the t
 
 ### Album art is back in the AppImage, and Settings title fix (November 8)
 
-The last two AppImages (November 6) were built without the part of Pillow that shows pictures in the window, so album covers didn't load. It had nothing to do with the folder rename. The AppImage includes it again, and the build now stops with an error if it's ever missing. Also, leaving Settings by clicking a tab at the top (like Music) no longer leaves "Settings" as the page title and status.
-
-### The app is now called Linuxpod (November 6)
-
-The window title, the name in the top bar, the menu entry and the AppImage (now `Linuxpod-x86_64.AppImage`) all say Linuxpod.
-
-The folders are renamed too:
-
-| Old | New |
-|---|---|
-| `~/Downloads/ipod-music-manager/` (install folder) | `~/Downloads/linuxpod/` |
-| `~/Downloads/ipod-music-manager.zip` | `~/Downloads/linuxpod.zip` |
-| `~/.local/share/ipod-music-manager/` (library, settings, logs) | `~/.local/share/linuxpod/` |
-
-To switch over once: quit the app, save `linuxpod.zip` and `rename_to_linuxpod.sh` to Downloads, and run `bash ~/Downloads/rename_to_linuxpod.sh`. It renames all three, unzips the new zip into the new install folder, and tells you if anything is in the way. It never deletes anything, and running it again is harmless. After that, use `~/Downloads/linuxpod/setup_and_run.sh` as usual.
-
-If you skip the script, the app (and the AppImage) moves the library folder by itself the first time it starts, and `setup_and_run.sh` moves the install folder and still accepts the old zip name. A link is left at `~/.local/share/ipod-music-manager` so saved paths to thumbnails and firmware inside it keep working.
+The last two AppImages (November 6) were built without the part of Pillow that shows pictures in the window, so album covers didn't load. The AppImage includes it again, and the build now stops with an error if it's ever missing. Also, leaving Settings by clicking a tab at the top (like Music) no longer leaves "Settings" as the page title and status.
 
 ### Ticked playlists only sync your ticked songs (November 6)
 

@@ -253,9 +253,6 @@ class MainApp(tk.Tk):
         apple_style.init_fonts(self)
 
         applog.log("=== Linuxpod started ===")
-        import appdirs
-        if appdirs.MIGRATION_NOTE:
-            applog.log("DATA FOLDER: " + appdirs.MIGRATION_NOTE)
         applog.log(f"Python {sys.version.split()[0]}, Tk {self.tk.call('info', 'patchlevel')}")
 
         self.lib = library.Library()

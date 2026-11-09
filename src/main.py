@@ -31,7 +31,7 @@ def _install_crash_logging():
         return
     crash_file.write(f"\n=== started (pid {os.getpid()}) ===\n")
     faulthandler.enable(file=crash_file, all_threads=True)
-    if os.environ.get("MUSIC_MANAGER_STDERR") != "terminal":
+    if os.environ.get("LINUXPOD_STDERR") != "terminal":
         print(f"Linuxpod: errors are logged to {applog.LOG_PATH} and {CRASH_LOG}")
         sys.stderr.flush()
         os.dup2(crash_file.fileno(), 2)

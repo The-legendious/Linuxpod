@@ -311,7 +311,7 @@ static void prepare_device(const char *mountpoint) {
     gchar *dev_dir = itdb_get_device_dir(mountpoint);
     if (!dev_dir) return;
     g_sie_path = g_build_filename(dev_dir, "SysInfoExtended", NULL);
-    g_sie_hidden_path = g_build_filename(dev_dir, "SysInfoExtended.musicmanager-hidden", NULL);
+    g_sie_hidden_path = g_build_filename(dev_dir, "SysInfoExtended.linuxpod-hidden", NULL);
     g_free(dev_dir);
 
     if (!g_file_test(g_sie_path, G_FILE_TEST_EXISTS) &&
@@ -867,7 +867,7 @@ static int cmd_sync(const char *mountpoint, const char *manifest_path) {
 /* ---- photo de-duplication ----------------------------------------
    The photo database keeps no file names, so two things stop the same
    picture landing on the iPod twice:
-   - a small list on the iPod (Photos/.musicmanager-photos.tsv) of the
+   - a small list on the iPod (Photos/.linuxpod-photos.tsv) of the
      source files already synced, by content hash, each paired with a
      hash of the thumbnail the iPod stored for it;
    - a hash of each stored thumbnail's pixels, which finds copies that
@@ -903,7 +903,7 @@ static gchar *file_sha1(const char *path) {
 static gchar *photo_index_path(const char *mountpoint) {
     gchar *dir = itdb_get_photos_dir(mountpoint);
     if (!dir) dir = g_build_filename(mountpoint, "Photos", NULL);
-    gchar *path = g_build_filename(dir, ".musicmanager-photos.tsv", NULL);
+    gchar *path = g_build_filename(dir, ".linuxpod-photos.tsv", NULL);
     g_free(dir);
     return path;
 }
