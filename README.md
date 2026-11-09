@@ -169,7 +169,7 @@ Open Settings with the gear button or **Edit → Settings…**.
 - **Video Folders:** where converted videos go and which folders are scanned.
 - **Podcasts:** download options.
 - **Spoofify:** the automatic playlists.
-- **Appearance:** the Apple-style look or a plainer one, and whether the window opens maximized.
+- **Appearance:** whether the window opens maximized, and the size of album, video and photo thumbnails.
 
 ## Shortcuts
 

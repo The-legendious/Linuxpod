@@ -258,13 +258,9 @@ class MainApp(tk.Tk):
         self.lib = library.Library()
         self.work_queue = queue.Queue()
         self.app_settings = settings.load()
-        # One-time switch to the Apple-style look for existing installs
-        # (it used to be opt-in and off by default) - after this the
-        # Appearance setting is respected as usual.
-        if not self.app_settings.get("apple_style_v1"):
-            self.app_settings["itunes_theme"] = True
-            self.app_settings["apple_style_v1"] = True
-            settings.save(self.app_settings)
+        # The iTunes/Apple-style look is the only look now; the plain
+        # one (and its Appearance toggle) is gone.
+        self.app_settings["itunes_theme"] = True
         apple_style.set_window_options(self, self.app_settings.get("itunes_theme", False))
         self._default_ttk_theme = ttk.Style().theme_use()
         # Opens maximized, as a normal window with its title bar and
@@ -1503,20 +1499,13 @@ class MainApp(tk.Tk):
 
         appearance_section = ttk.LabelFrame(frame, text="Appearance", padding=12)
         appearance_section.pack(fill=tk.X, pady=(0, 16))
-        self.itunes_theme_var = tk.BooleanVar(value=self.app_settings.get("itunes_theme", False))
-        ttk.Checkbutton(
-            appearance_section,
-            text="Use the Apple-style look (rounded controls, smooth scrolling and animations)",
-            variable=self.itunes_theme_var,
-            command=self.toggle_itunes_theme,
-        ).pack(anchor="w")
         self.start_maximized_var = tk.BooleanVar(value=self.app_settings.get("start_maximized", True))
         ttk.Checkbutton(
             appearance_section,
             text="Open maximized (F11 switches to borderless full screen and back)",
             variable=self.start_maximized_var,
             command=self._save_start_maximized,
-        ).pack(anchor="w", pady=(6, 0))
+        ).pack(anchor="w")
 
         thumb_row = ttk.Frame(appearance_section)
         thumb_row.pack(fill=tk.X, pady=(12, 0))
@@ -3701,13 +3690,6 @@ class MainApp(tk.Tk):
         settings.save(self.app_settings)
         self.converted_videos_folder_var.set(folder)
         applog.log(f"SETTINGS: converted videos folder set to '{folder}'")
-
-    def toggle_itunes_theme(self):
-        enabled = self.itunes_theme_var.get()
-        self.app_settings["itunes_theme"] = enabled
-        settings.save(self.app_settings)
-        applog.log(f"SETTINGS: iTunes theme {'enabled' if enabled else 'disabled'}")
-        self._apply_theme(enabled)
 
     def _smooth_motion(self):
         """Eased scrolling/animations are part of the Apple-style look."""
