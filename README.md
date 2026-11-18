@@ -186,7 +186,7 @@ Open Settings with the gear button or **Edit → Settings…**.
 
 - **The log:** `~/.local/share/linuxpod/app.log` records what the app does and any errors. Open it with **Help → Open Log File**. If the app crashes, also look at `crash.log` in the same folder. Your library and settings are kept in that folder too.
 - **The iPod isn't found:** check that it shows up in your file manager, then try **iPod → Detect / Auto-Mount iPod**.
-- **Sync fails with "Couldn't find the iPod firewire ID":** newer iPods (Nano 3rd generation and later, Classic) need a file that libgpod normally creates when the iPod is plugged in. Install `libgpod-common`, then unplug the iPod and plug it back in.
+- **Sync fails with "Couldn't find the iPod firewire ID":** iPods that sign their song database (Nano 3rd generation and later, Classic) need their FireWire ID. Linuxpod adds it to the iPod's `iPod_Control/Device/SysInfo` file by itself, from the iPod's USB serial number. If it still fails, check that `lsblk -o NAME,SERIAL` shows a 16-character serial for the iPod, or add the line `FirewireGuid: 0x` followed by that serial to SysInfo yourself.
 - **Songs don't appear on an iPod Classic (6th/7th generation) or Nano (5th generation and later):** these use an extra database checksum. Try the newest libgpod your distribution offers.
 - **No cover art on the iPod:** use **Set iPod Model…** on the Summary page so the app knows exactly which iPod you have.
 - **Something went wrong on the iPod:** the app never formats the iPod. At worst its music database needs rebuilding, which a restore with Apple's tools (or gtkpod) fixes.

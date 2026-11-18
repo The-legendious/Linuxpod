@@ -9,6 +9,7 @@ output into Python data the GUI can use.
 """
 
 import json
+import re
 import signal
 import threading
 import os
@@ -17,6 +18,7 @@ import shutil
 import subprocess
 import tempfile
 
+import applog
 import artwork
 
 HELPER_NAMES = ("ipod_helper",)
@@ -381,7 +383,138 @@ def find_or_mount_ipod():
     return found, "; ".join(notes) if notes else None
 
 
+def _block_device_for_mount(mountpoint):
+    """'/dev/sdb1' (or similar) for the filesystem mounted at mountpoint."""
+    target = os.path.realpath(mountpoint)
+    try:
+        with open("/proc/self/mounts", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                # /proc/mounts writes spaces in paths as \040
+                mp = parts[1].replace("\\040", " ").replace("\\011", "\t").replace("\\134", "\\")
+                if os.path.realpath(mp) == target and parts[0].startswith("/dev/"):
+                    return parts[0]
+    except OSError:
+        pass
+    return None
+
+
+def _usb_serial_from_sysfs(devnode, sysroot="/sys"):
+    """The USB serial number of the device behind /dev/sdXN, read from
+    sysfs (no root needed): walks up from the disk to the USB device."""
+    name = os.path.basename(os.path.realpath(devnode))
+    block = os.path.realpath(os.path.join(sysroot, "class", "block", name))
+    if os.path.exists(os.path.join(block, "partition")):
+        block = os.path.dirname(block)  # the partition's parent disk
+    path = os.path.realpath(os.path.join(block, "device"))
+    while path and path not in ("/", sysroot):
+        serial_file = os.path.join(path, "serial")
+        if os.path.exists(serial_file) and os.path.exists(os.path.join(path, "idVendor")):
+            try:
+                with open(serial_file, encoding="utf-8", errors="replace") as f:
+                    return f.read().strip() or None
+            except OSError:
+                return None
+        path = os.path.dirname(path)
+    return None
+
+
+def _lsblk_serial_for_mount(mountpoint):
+    if not shutil.which("lsblk"):
+        return None
+    try:
+        result = subprocess.run(
+            ["lsblk", "-J", "-o", "NAME,MOUNTPOINT,SERIAL,TYPE"],
+            capture_output=True, text=True, timeout=5,
+        )
+        data = json.loads(result.stdout or "{}")
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return None
+    target = os.path.realpath(mountpoint)
+
+    def mounted_here(node):
+        mp = node.get("mountpoint")
+        if mp and os.path.realpath(mp) == target:
+            return True
+        return any(mounted_here(c) for c in node.get("children") or [])
+
+    for disk in data.get("blockdevices", []):
+        if mounted_here(disk):
+            return (disk.get("serial") or "").strip() or None
+    return None
+
+
+def _usb_serial_for_mount(mountpoint):
+    """Candidate USB serial numbers for the iPod mounted at mountpoint:
+    from sysfs first (the USB device's own serial), then lsblk."""
+    found = []
+    dev = _block_device_for_mount(mountpoint)
+    if dev:
+        found.append(_usb_serial_from_sysfs(dev))
+    found.append(_lsblk_serial_for_mount(mountpoint))
+    return [x for x in found if x]
+
+
+def ensure_firewire_guid(mountpoint):
+    """iPods that sign their database (Nano 3rd generation and later,
+    Classic) need their FireWire ID, which libgpod looks for in
+    SysInfo or SysInfoExtended. When neither has it, write it into
+    SysInfo from the iPod's USB serial number, which is that same ID.
+    Returns a note for the log when it writes one, else None."""
+    device_dir = os.path.join(mountpoint, "iPod_Control", "Device")
+    if not os.path.isdir(device_dir):
+        return None
+    sysinfo = os.path.join(device_dir, "SysInfo")
+    for path, needle in ((sysinfo, "firewireguid"),
+                         (os.path.join(device_dir, "SysInfoExtended"), "firewireguid")):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                if needle in f.read().lower():
+                    return None
+        except OSError:
+            pass
+    candidates = _usb_serial_for_mount(mountpoint)
+    serial = None
+    for c in candidates:
+        c = c.upper()
+        if c.startswith("0X"):
+            c = c[2:]
+        if re.fullmatch(r"[0-9A-F]{16}", c):
+            serial = c
+            break
+    if not serial:
+        return ("no FireWire ID on the iPod and couldn't get one from its USB serial number "
+                f"(found: {', '.join(candidates) or 'nothing'})")
+    try:
+        existing = ""
+        if os.path.exists(sysinfo):
+            with open(sysinfo, encoding="utf-8", errors="replace") as f:
+                existing = f.read()
+        with open(sysinfo, "a", encoding="utf-8") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            f.write(f"FirewireGuid: 0x{serial}\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError as e:
+        return f"couldn't add the iPod's FireWire ID to SysInfo: {e}"
+    return f"added FirewireGuid 0x{serial} (from its USB serial number) to SysInfo"
+
+
+_id_notes_logged = set()
+
+
 def _run_helper(args, timeout=None):
+    if len(args) >= 2 and os.path.isdir(os.path.join(args[1], "iPod_Control")):
+        try:
+            note = ensure_firewire_guid(args[1])
+            if note and (args[1], note) not in _id_notes_logged:
+                _id_notes_logged.add((args[1], note))
+                applog.log("IPOD ID: " + note)
+        except Exception as e:  # never block a job over this
+            applog.log(f"IPOD ID: check failed: {type(e).__name__}: {e}")
     helper = locate_helper()
     proc = subprocess.Popen(
         [helper] + list(args),
