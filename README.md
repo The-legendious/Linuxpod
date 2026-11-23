@@ -99,6 +99,8 @@ Open **View Connected Device** from the menu bar. It's greyed out until an iPod 
 
 Then press **Sync** at the bottom. The iPod is made to match what you ticked. Ticked items are copied over, and anything already on the iPod isn't copied again. Before anything is removed, the app lists it and asks you.
 
+Next to the Sync button, a line shows what the next sync will do as you tick and untick: how many songs will be added and their size, what will be removed, and how much space the iPod will have left. It turns red and says how much you're over if the songs won't fit. Sync then won't start until you untick enough.
+
 How ticks work:
 
 - Ticking an album ticks all its songs, and unticking it unticks them. Unticking one song from an album unticks the album, and its other songs stay ticked.
