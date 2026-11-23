@@ -351,6 +351,8 @@ class MainApp(tk.Tk):
             apple_style.fade_in_window(self)
         self._bind_mouse_back_button()
         self.after(200, self._poll_queue)
+        self.after(500, self._space_meter_tick)
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
         # Auto-refresh everything (music/video/photo folders) shortly
         # after startup, quietly skipping the "nothing to refresh yet"
         # popup if no folders have been added at all - see
@@ -431,7 +433,7 @@ class MainApp(tk.Tk):
         file_menu.add_separator()
         file_menu.add_command(label="Clear Library…", command=self.clear_library)
         file_menu.add_separator()
-        file_menu.add_command(label="Quit", command=self.destroy)
+        file_menu.add_command(label="Quit", command=self._on_window_close)
         menubar.add_cascade(label="File", menu=file_menu)
 
         ipod_menu = tk.Menu(menubar, tearoff=0)
@@ -3577,9 +3579,14 @@ class MainApp(tk.Tk):
                 self.device_view_sync_button.pack(
                     side=tk.RIGHT, before=self.device_view_done_button, padx=(0, 8)
                 )
+            if not self.space_meter_label.winfo_ismapped():
+                self.space_meter_label.pack(
+                    side=tk.RIGHT, after=self.device_view_done_button, padx=(0, 12)
+                )
         else:
             self.device_view_done_button.pack_forget()
             self.device_view_sync_button.pack_forget()
+            self.space_meter_label.pack_forget()
 
     def sync_all_to_ipod(self):
         if not self.ipod_mountpoint:
@@ -3594,6 +3601,8 @@ class MainApp(tk.Tk):
             f"Sync your entire local library ({len(rows)} track(s)) to "
             f"{self.ipod_label or 'this iPod'}? This can take a while for a large library.",
         ):
+            return
+        if not self._music_fits_or_warn(sync_all=True):
             return
         self._sync_rows_to_ipod(rows)
 
@@ -3710,7 +3719,8 @@ class MainApp(tk.Tk):
         apple_style.set_window_options(self, enabled)
         apple_style.SmoothProgressbar.animate = enabled
         chrome_frames = (self.toolbar_bar, self.body_frame, self.sidebar_frame, self.statusbar_bar)
-        chrome_labels = (self.search_label, self.status_label, self.summary_label, self.progress_label)
+        chrome_labels = (self.search_label, self.status_label, self.summary_label, self.progress_label,
+                         self.space_meter_label)
         accent_buttons = (self.sync_button, self.sync_all_button, self.device_view_sync_button,
                           self.video_sync_button, self.photo_sync_button, self.playlist_sync_button)
         if enabled:
@@ -3896,6 +3906,128 @@ class MainApp(tk.Tk):
         self.device_view_sync_button = ttk.Button(
             bar, text="Sync", command=self._device_view_sync_selected
         )
+        # Live "how much will fit" readout for the ticked songs, shown
+        # left of Sync while the device view is open (see _space_meter_tick).
+        self.space_meter_var = tk.StringVar(value="")
+        self.space_meter_label = ttk.Label(bar, textvariable=self.space_meter_var)
+        self._space_meter_sig = None
+        self._space_meter_checked = 0.0
+        self._space_plan = None
+
+    # Room left on the iPod for the songs it will get. Kept for the
+    # iPod's database and artwork, which grow with each sync.
+    SPACE_HEADROOM = 50 * 1024 * 1024
+
+    def _music_space_plan(self, sync_all=None, removals=True):
+        """What a Sync would do to the iPod's free space, worked out the
+        same way the sync itself decides: songs already on the iPod are
+        skipped, songs no longer ticked come off (only exact, linked
+        copies; see _compute_extra_music_on_device). Returns a dict, or
+        None when no iPod is connected."""
+        if not self.ipod_mountpoint:
+            return None
+        try:
+            usage = shutil.disk_usage(self.ipod_mountpoint)
+        except OSError:
+            return None
+        if sync_all is None:
+            sync_all = self.app_settings.get("sync_all_music", False)
+        if sync_all:
+            rows = self.lib.all_tracks(include_podcasts=True)
+            extra = []
+        else:
+            wanted = self._compute_wanted_music_track_ids()
+            rows = self.lib.tracks_by_ids(list(wanted)) if wanted else []
+            extra = self._compute_extra_music_on_device() if removals else []
+        linked_ids = set(self.device_track_links.values())
+        unlinked_keys = {
+            _track_dup_key(t.get("title"), t.get("artist"), t.get("album"), t.get("duration_ms"))
+            for t in self.device_tracks if str(t["dbid"]) not in self.device_track_links
+        }
+        add_bytes = add_count = 0
+        for r in rows:
+            if f".{(r['filetype'] or '').lower()}" not in scanner.IPOD_PLAYABLE_EXTENSIONS:
+                continue
+            if r["id"] in linked_ids or _track_dup_key(
+                r["title"], r["artist"], r["album"], r["duration_ms"]
+            ) in unlinked_keys:
+                continue
+            size = r["size_bytes"]
+            if not size:
+                try:
+                    size = os.path.getsize(r["filepath"])
+                except (OSError, TypeError):
+                    size = 0
+            add_bytes += size
+            add_count += 1
+        remove_bytes = sum(t.get("size_bytes") or 0 for t in extra)
+        free_after = usage.free + remove_bytes - add_bytes
+        return {
+            "add_bytes": add_bytes, "add_count": add_count,
+            "remove_bytes": remove_bytes, "remove_count": len(extra),
+            "free": usage.free, "total": usage.total, "free_after": free_after,
+            "fits": free_after >= self.SPACE_HEADROOM,
+        }
+
+    def _space_meter_tick(self):
+        """Runs twice a second. Recomputes the space readout whenever the
+        ticked songs, albums or playlists (or the iPod's contents)
+        change, and every few seconds anyway to catch the free space
+        changing, so the number follows each tick as it happens."""
+        try:
+            if self._device_view_active and self.ipod_mountpoint and self._ipod_job_running():
+                # Mid-sync the iPod's free space already includes the songs
+                # copied so far, but its song list doesn't yet, so they'd
+                # be counted twice. Hold off until the sync finishes.
+                self._space_meter_sig = None
+                self.space_meter_label.configure(foreground="")
+                self.space_meter_var.set("Syncing\u2026 space updates when it's done")
+            elif self._device_view_active and self.ipod_mountpoint:
+                sig = (
+                    frozenset(self._persistent_table_selection),
+                    frozenset(self._selected_albums),
+                    frozenset(self._selected_playlist_ids),
+                    len(self.device_tracks or []),
+                    len(self.device_track_links or {}),
+                    bool(self.app_settings.get("sync_all_music", False)),
+                    self.ipod_mountpoint,
+                )
+                now = time.monotonic()
+                if sig != self._space_meter_sig or now - self._space_meter_checked > 5:
+                    self._space_meter_sig = sig
+                    self._space_meter_checked = now
+                    self._show_space_plan(self._music_space_plan())
+            elif self._space_meter_sig is not None:
+                self._space_meter_sig = None
+                self._space_plan = None
+                self.space_meter_var.set("")
+        except Exception:
+            applog.log("SPACE METER FAILED:\n" + traceback.format_exc())
+        self.after(500, self._space_meter_tick)
+
+    def _show_space_plan(self, plan):
+        self._space_plan = plan
+        if plan is None:
+            self.space_meter_var.set("")
+            return
+        parts = []
+        if plan["add_count"]:
+            parts.append(f"Adding {plan['add_count']} song{'s' if plan['add_count'] != 1 else ''} "
+                         f"({format_bytes(plan['add_bytes'])})")
+        if plan["remove_count"]:
+            parts.append(f"removing {plan['remove_count']} ({format_bytes(plan['remove_bytes'])})")
+        if not parts:
+            parts.append("Nothing new to add")
+        if plan["fits"]:
+            tail = f"{format_bytes(plan['free_after'])} free after sync"
+            color = ""
+        else:
+            short = self.SPACE_HEADROOM - plan["free_after"]
+            tail = f"Not enough space: {format_bytes(short)} over"
+            color = "#d0342c"
+        text = " \u00B7 ".join(parts) + " \u00B7 " + tail
+        self.space_meter_var.set(text[0].upper() + text[1:])
+        self.space_meter_label.configure(foreground=color)
 
     def _device_view_sync_selected(self):
         """The persistent Sync button next to Done in the device view.
@@ -4009,11 +4141,32 @@ class MainApp(tk.Tk):
             if links.get(str(t["dbid"])) is not None and links[str(t["dbid"])] not in wanted_ids
         ]
 
+    def _music_fits_or_warn(self, sync_all=None, removals=True):
+        """False (after telling the user) when the ticked songs won't fit."""
+        plan = self._music_space_plan(sync_all=sync_all, removals=removals)
+        if plan is None or plan["fits"]:
+            return True
+        short = self.SPACE_HEADROOM - plan["free_after"]
+        messagebox.showwarning(
+            "Not Enough Space",
+            f"The ticked songs need {format_bytes(plan['add_bytes'])}, but "
+            f"{self.ipod_label or 'the iPod'} only has room for "
+            f"{format_bytes(max(plan['free'] + plan['remove_bytes'] - self.SPACE_HEADROOM, 0))}. "
+            f"Untick about {format_bytes(short)} of music and press Sync again.\n\n"
+            "Nothing was changed on the iPod.",
+        )
+        return False
+
     def _reconcile_and_sync_music(self):
+        if not self._music_fits_or_warn():
+            return
         self._unticked_track_ids = set()
         extra = self._compute_extra_music_on_device()
         if extra and not self._confirm_reconcile_removal(extra, "track"):
             extra = []
+            # Those songs stay, so check again without their space back.
+            if not self._music_fits_or_warn(removals=False):
+                return
         wanted = self._compute_wanted_music_track_ids()
         if not wanted and not extra:
             messagebox.showinfo(
@@ -7663,9 +7816,44 @@ class MainApp(tk.Tk):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _ipod_job_running(self):
+        return self._active_sync_handle is not None or self._post_remove_callback is not None
+
+    def _on_window_close(self):
+        """Closing mid-sync used to kill the copy before the iPod's song
+        list was written, leaving songs on it the iPod couldn't see.
+        Now the sync is stopped cleanly first: what was copied is kept."""
+        if not self._ipod_job_running():
+            self.destroy()
+            return
+        if not messagebox.askyesno(
+            "Sync in Progress",
+            "The iPod is still syncing. Stop the sync and close?\n\n"
+            "Songs copied so far are kept. Linuxpod closes by itself once the "
+            "iPod's song list is saved.",
+        ):
+            return
+        self._closing = True  # no new sync starts after a removal finishes
+        self.cancel_sync()
+        self.status_var.set("Stopping the sync, then closing…")
+        self._close_when_idle()
+
+    def _close_when_idle(self):
+        if self._ipod_job_running():
+            self.after(300, self._close_when_idle)
+        else:
+            self.destroy()
+
     def eject_ipod(self):
         if not self.ipod_mountpoint:
             messagebox.showinfo("No iPod", "No iPod is currently connected.")
+            return
+        if self._ipod_job_running():
+            messagebox.showinfo(
+                "iPod Busy",
+                "The iPod is still syncing. Wait for it to finish, or press Cancel Sync "
+                "and wait for it to stop, then eject.",
+            )
             return
         if not messagebox.askyesno(
             "Eject iPod",
@@ -7940,6 +8128,8 @@ class MainApp(tk.Tk):
         playlist (right-click it -> Sync Playlist to iPod) does."""
         if not rows and not playlists:
             return
+        if getattr(self, "_closing", False):
+            return
         if not self.ipod_mountpoint:
             if not silent:
                 messagebox.showwarning("No iPod", "Detect or choose an iPod folder first (iPod menu).")
@@ -8002,6 +8192,36 @@ class MainApp(tk.Tk):
                 return
 
         playlist_names_by_track_id = playlist_names_by_track_id or {}
+
+        # Never start a sync that won't fit (every sync path ends here,
+        # after songs already on the iPod were dropped above).
+        need = 0
+        for r in rows:
+            size = r["size_bytes"]
+            if not size:
+                try:
+                    size = os.path.getsize(r["filepath"])
+                except (OSError, TypeError):
+                    size = 0
+            need += size
+        try:
+            free = shutil.disk_usage(self.ipod_mountpoint).free
+        except OSError:
+            free = None
+        if free is not None and free - need < self.SPACE_HEADROOM:
+            room = max(free - self.SPACE_HEADROOM, 0)
+            applog.log(f"SYNC: not started, needs {format_bytes(need)} but only {format_bytes(room)} fits")
+            if not silent:
+                messagebox.showwarning(
+                    "Not Enough Space",
+                    f"These {len(rows)} song(s) need {format_bytes(need)}, but "
+                    f"{self.ipod_label or 'the iPod'} only has room for {format_bytes(room)}. "
+                    f"Untick about {format_bytes(need - room)} of music and sync again.\n\n"
+                    "Nothing was copied.",
+                )
+            else:
+                self.status_var.set("Auto-sync skipped: not enough space on the iPod.")
+            return
 
         self.progress.configure(mode="determinate", maximum=max(len(rows), 1), value=0)
         skip_note = f" ({len(already_there)} already on the device, skipped)" if already_there else ""
@@ -8954,7 +9174,19 @@ class MainApp(tk.Tk):
                         applog.log("SYNC artwork: " + "; ".join(art_notes))
                     if errors:
                         applog.log(f"SYNC errors ({len(errors)}): " + " | ".join(errors))
-                        messagebox.showwarning("Sync finished with warnings", "\n".join(errors))
+                        full = [e for e in errors if e.startswith("not enough space on the iPod")]
+                        other = [e for e in errors if e not in full]
+                        lines = []
+                        if full:
+                            lines.append(
+                                f"The iPod filled up, so {len(full)} song(s) weren't copied. "
+                                f"The {added} song(s) that fit are on the iPod and play normally. "
+                                "Untick some music to make room for the rest."
+                            )
+                        lines += other[:10]
+                        if len(other) > 10:
+                            lines.append(f"\u2026and {len(other) - 10} more")
+                        messagebox.showwarning("Sync finished with warnings", "\n\n".join(lines))
                     if cancelled:
                         status = f"Sync cancelled — {added} track(s) were saved before stopping."
                     else:

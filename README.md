@@ -99,6 +99,8 @@ Open **View Connected Device** from the menu bar. It's greyed out until an iPod 
 
 Then press **Sync** at the bottom. The iPod is made to match what you ticked. Ticked items are copied over, and anything already on the iPod isn't copied again. Before anything is removed, the app lists it and asks you.
 
+Next to the Sync button, a line shows what the next sync will do as you tick and untick: how many songs will be added and their size, what will be removed, and how much space the iPod will have left. It turns red and says how much you're over if the songs won't fit. Sync then won't start until you untick enough.
+
 How ticks work:
 
 - Ticking an album ticks all its songs, and unticking it unticks them. Unticking one song from an album unticks the album, and its other songs stay ticked.
@@ -185,6 +187,8 @@ Open Settings with the gear button or **Edit → Settings…**.
 ## Troubleshooting
 
 - **The log:** `~/.local/share/linuxpod/app.log` records what the app does and any errors. Open it with **Help → Open Log File**. If the app crashes, also look at `crash.log` in the same folder. Your library and settings are kept in that folder too.
+- **The iPod is full of songs it doesn't show:** a sync that was stopped part-way (the app closed or the iPod unplugged) can leave copied songs that aren't in the iPod's song list. Open Settings and press **Clean Up Leftover Files…** to delete them, then sync again. Linuxpod now saves the song list every 100 songs and stops cleanly if you close it mid-sync, so at most the last few songs are lost.
+- **The iPod filled up during a sync:** Linuxpod stops copying when about 30 MB is left, so the song list can still be saved. Everything that fit plays normally. Untick some music and sync again.
 - **The iPod isn't found:** check that it shows up in your file manager, then try **iPod → Detect / Auto-Mount iPod**.
 - **Sync fails with "Couldn't find the iPod firewire ID":** iPods that sign their song database (Nano 3rd generation and later, Classic) need their FireWire ID. Linuxpod adds it to the iPod's `iPod_Control/Device/SysInfo` file by itself, from the iPod's USB serial number. If it still fails, check that `lsblk -o NAME,SERIAL` shows a 16-character serial for the iPod, or add the line `FirewireGuid: 0x` followed by that serial to SysInfo yourself.
 - **Songs don't appear on an iPod Classic (6th/7th generation) or Nano (5th generation and later):** these use an extra database checksum. Try the newest libgpod your distribution offers.
