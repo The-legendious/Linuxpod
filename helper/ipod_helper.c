@@ -92,6 +92,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/file.h>
+#include <sys/statvfs.h>
+#include <errno.h>
 
 #define MAX_LINE 8192
 #define MAX_FIELDS 32
@@ -107,6 +109,36 @@ static volatile sig_atomic_t g_cancel_requested = 0;
 static void handle_cancel_signal(int sig) {
     (void) sig;
     g_cancel_requested = 1;
+}
+
+/* Room kept free on the iPod during a sync, for the database and
+   artwork files that are written after the songs. */
+#define SYNC_RESERVE_BYTES (30LL * 1024 * 1024)
+/* Write the database every this many new songs, so a sync that is
+   stopped part-way (app closed, iPod unplugged) keeps what it copied
+   instead of leaving files the iPod can't see. */
+#ifndef SYNC_CHECKPOINT_EVERY
+#define SYNC_CHECKPOINT_EVERY 100
+#endif
+
+/* TRUE when the iPod has room for this file plus the reserve. */
+static gboolean ipod_has_room(const char *mountpoint, const char *filepath, long long *need, long long *avail) {
+    GStatBuf st;
+    struct statvfs vfs;
+    *need = 0;
+    *avail = -1;
+    if (g_stat(filepath, &st) != 0 || statvfs(mountpoint, &vfs) != 0)
+        return TRUE;  /* can't tell; let the copy itself decide */
+    *need = (long long) st.st_size;
+    *avail = (long long) vfs.f_bavail * (long long) vfs.f_frsize;
+    return *avail - *need >= SYNC_RESERVE_BYTES;
+}
+
+/* Prints to the app; if the app has gone away (pipe closed), stop the
+   sync cleanly instead of being killed mid-copy. */
+static void flush_or_cancel(void) {
+    if (fflush(stdout) != 0 || ferror(stdout))
+        g_cancel_requested = 1;
 }
 
 static void split_line(char *line) {
@@ -486,11 +518,44 @@ static void apply_playlist_sets(Itdb_iTunesDB *itdb, const char *manifest_path,
     }
 }
 
+/* Every SYNC_CHECKPOINT_EVERY new songs, write the database so the
+   songs copied so far are real iPod songs even if the sync is stopped
+   later. Reports their dbids (ADDED) right away. FALSE if the write
+   failed, which ends the copying; the final write then retries and
+   rolls back only what came after the last good write. */
+static gboolean sync_checkpoint(Itdb_iTunesDB *itdb, GPtrArray *added_tracks,
+                                GPtrArray *added_sources, guint *committed) {
+    if (added_tracks->len - *committed < SYNC_CHECKPOINT_EVERY)
+        return TRUE;
+    GError *error = NULL;
+    if (!itdb_write(itdb, &error)) {
+        printf("ERROR\tfailed to save progress to the iTunesDB: %s\n",
+               error && error->message ? error->message : "unknown error");
+        flush_or_cancel();
+        if (error) g_error_free(error);
+        return FALSE;
+    }
+    for (guint i = *committed; i < added_tracks->len && i < added_sources->len; i++) {
+        Itdb_Track *t = (Itdb_Track *) g_ptr_array_index(added_tracks, i);
+        printf("ADDED\t%" G_GUINT64_FORMAT "\t%s\n", t->dbid,
+               (const char *) g_ptr_array_index(added_sources, i));
+    }
+    *committed = added_tracks->len;
+    sync();
+    flush_or_cancel();
+    return TRUE;
+}
+
 static int cmd_sync(const char *mountpoint, const char *manifest_path) {
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = handle_cancel_signal;
     sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGHUP, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
+    /* A closed app means a closed pipe: finish cleanly (see
+       flush_or_cancel) rather than dying on SIGPIPE mid-sync. */
+    signal(SIGPIPE, SIG_IGN);
 
     GError *error = NULL;
     Itdb_iTunesDB *itdb = itdb_parse(mountpoint, &error);
@@ -578,6 +643,11 @@ static int cmd_sync(const char *mountpoint, const char *manifest_path) {
        the track's dbid after the write so the app knows exactly which
        iPod copy is which library song. */
     GPtrArray *added_sources = g_ptr_array_new_with_free_func(g_free);
+    /* added_tracks[0..committed) are already in a written database
+       (see SYNC_CHECKPOINT_EVERY) and are never rolled back. */
+    guint committed = 0;
+    int full_skipped = 0;
+    long long full_skipped_bytes = 0;
     int art_queued = 0;
     while (fgets(line, sizeof(line), fp)) {
         if (g_cancel_requested) {
@@ -606,7 +676,7 @@ static int cmd_sync(const char *mountpoint, const char *manifest_path) {
 
             current++;
             printf("PROGRESS\t%d\t%d\t%s\n", current, total, title);
-            fflush(stdout);
+            flush_or_cancel();
 
             Itdb_Track *track = itdb_track_new();
             track->title = dup_or_null(title);
@@ -669,6 +739,18 @@ static int cmd_sync(const char *mountpoint, const char *manifest_path) {
                still required (every track must exist in the itdb's
                own tracklist), just not itdb_playlist_add_track(mpl, ...). */
 
+            {
+                long long need, avail;
+                if (!ipod_has_room(mountpoint, filepath, &need, &avail)) {
+                    printf("ERROR\tnot enough space on the iPod for %s (needs %lld MB, %lld MB free)\n",
+                           filepath, need / (1024 * 1024), avail / (1024 * 1024));
+                    flush_or_cancel();
+                    full_skipped++;
+                    full_skipped_bytes += need;
+                    detach_track(itdb, track);
+                    continue;
+                }
+            }
             GError *cp_error = NULL;
             if (!itdb_cp_track_to_ipod(track, filepath, &cp_error)) {
                 printf("ERROR\tfailed to copy %s: %s\n", filepath,
@@ -681,6 +763,7 @@ static int cmd_sync(const char *mountpoint, const char *manifest_path) {
             added++;
             g_ptr_array_add(added_tracks, track);
             g_ptr_array_add(added_sources, g_strdup(filepath));
+            if (!sync_checkpoint(itdb, added_tracks, added_sources, &committed)) break;
             continue;
         }
 
@@ -700,7 +783,7 @@ static int cmd_sync(const char *mountpoint, const char *manifest_path) {
 
         current++;
         printf("PROGRESS\t%d\t%d\t%s\n", current, total, title);
-        fflush(stdout);
+        flush_or_cancel();
 
         Itdb_Track *track = itdb_track_new();
         track->title = dup_or_null(title);
@@ -771,6 +854,18 @@ static int cmd_sync(const char *mountpoint, const char *manifest_path) {
             }
         }
 
+        {
+            long long need, avail;
+            if (!ipod_has_room(mountpoint, filepath, &need, &avail)) {
+                printf("ERROR\tnot enough space on the iPod for %s (needs %lld MB, %lld MB free)\n",
+                       filepath, need / (1024 * 1024), avail / (1024 * 1024));
+                flush_or_cancel();
+                full_skipped++;
+                full_skipped_bytes += need;
+                detach_track(itdb, track);
+                continue;
+            }
+        }
         GError *cp_error = NULL;
         if (!itdb_cp_track_to_ipod(track, filepath, &cp_error)) {
             printf("ERROR\tfailed to copy %s: %s\n", filepath,
@@ -783,8 +878,13 @@ static int cmd_sync(const char *mountpoint, const char *manifest_path) {
         added++;
         g_ptr_array_add(added_tracks, track);
         g_ptr_array_add(added_sources, g_strdup(filepath));
+        if (!sync_checkpoint(itdb, added_tracks, added_sources, &committed)) break;
     }
     fclose(fp);
+    if (full_skipped > 0) {
+        printf("INFO\tipod_full\t%d\t%lld\n", full_skipped, full_skipped_bytes);
+        flush_or_cancel();
+    }
     if (!g_cancel_requested)
         apply_playlist_sets(itdb, manifest_path, added_tracks, added_sources);
 
@@ -795,7 +895,7 @@ static int cmd_sync(const char *mountpoint, const char *manifest_path) {
         /* Roll back every file copied in this sync - otherwise a write
            failure leaves them sitting on the device wasting space with
            no working database entry pointing at them. */
-        for (guint i = 0; i < added_tracks->len; i++) {
+        for (guint i = committed; i < added_tracks->len; i++) {
             Itdb_Track *t = (Itdb_Track *) g_ptr_array_index(added_tracks, i);
             gchar *onipod = itdb_filename_on_ipod(t);
             if (onipod) {
@@ -804,8 +904,8 @@ static int cmd_sync(const char *mountpoint, const char *manifest_path) {
             }
             detach_track(itdb, t);
         }
-        printf("INFO\tnote\trolled back %d copied file(s) since the database write failed\n",
-               added_tracks->len);
+        printf("INFO\tnote\trolled back %u copied file(s) since the database write failed\n",
+               added_tracks->len - committed);
         fflush(stdout);
         g_ptr_array_free(added_tracks, TRUE);
         g_ptr_array_free(added_sources, TRUE);
@@ -814,7 +914,7 @@ static int cmd_sync(const char *mountpoint, const char *manifest_path) {
         return 1;
     }
 
-    for (guint i = 0; i < added_tracks->len && i < added_sources->len; i++) {
+    for (guint i = committed; i < added_tracks->len && i < added_sources->len; i++) {
         Itdb_Track *t = (Itdb_Track *) g_ptr_array_index(added_tracks, i);
         printf("ADDED\t%" G_GUINT64_FORMAT "\t%s\n", t->dbid,
                (const char *) g_ptr_array_index(added_sources, i));

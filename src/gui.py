@@ -352,6 +352,7 @@ class MainApp(tk.Tk):
         self._bind_mouse_back_button()
         self.after(200, self._poll_queue)
         self.after(500, self._space_meter_tick)
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
         # Auto-refresh everything (music/video/photo folders) shortly
         # after startup, quietly skipping the "nothing to refresh yet"
         # popup if no folders have been added at all - see
@@ -432,7 +433,7 @@ class MainApp(tk.Tk):
         file_menu.add_separator()
         file_menu.add_command(label="Clear Library…", command=self.clear_library)
         file_menu.add_separator()
-        file_menu.add_command(label="Quit", command=self.destroy)
+        file_menu.add_command(label="Quit", command=self._on_window_close)
         menubar.add_cascade(label="File", menu=file_menu)
 
         ipod_menu = tk.Menu(menubar, tearoff=0)
@@ -7808,9 +7809,44 @@ class MainApp(tk.Tk):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _ipod_job_running(self):
+        return self._active_sync_handle is not None or self._post_remove_callback is not None
+
+    def _on_window_close(self):
+        """Closing mid-sync used to kill the copy before the iPod's song
+        list was written, leaving songs on it the iPod couldn't see.
+        Now the sync is stopped cleanly first: what was copied is kept."""
+        if not self._ipod_job_running():
+            self.destroy()
+            return
+        if not messagebox.askyesno(
+            "Sync in Progress",
+            "The iPod is still syncing. Stop the sync and close?\n\n"
+            "Songs copied so far are kept. Linuxpod closes by itself once the "
+            "iPod's song list is saved.",
+        ):
+            return
+        self._closing = True  # no new sync starts after a removal finishes
+        self.cancel_sync()
+        self.status_var.set("Stopping the sync, then closing…")
+        self._close_when_idle()
+
+    def _close_when_idle(self):
+        if self._ipod_job_running():
+            self.after(300, self._close_when_idle)
+        else:
+            self.destroy()
+
     def eject_ipod(self):
         if not self.ipod_mountpoint:
             messagebox.showinfo("No iPod", "No iPod is currently connected.")
+            return
+        if self._ipod_job_running():
+            messagebox.showinfo(
+                "iPod Busy",
+                "The iPod is still syncing. Wait for it to finish, or press Cancel Sync "
+                "and wait for it to stop, then eject.",
+            )
             return
         if not messagebox.askyesno(
             "Eject iPod",
@@ -8084,6 +8120,8 @@ class MainApp(tk.Tk):
         to get synced some other way. Only deliberately syncing that
         playlist (right-click it -> Sync Playlist to iPod) does."""
         if not rows and not playlists:
+            return
+        if getattr(self, "_closing", False):
             return
         if not self.ipod_mountpoint:
             if not silent:
@@ -9099,7 +9137,19 @@ class MainApp(tk.Tk):
                         applog.log("SYNC artwork: " + "; ".join(art_notes))
                     if errors:
                         applog.log(f"SYNC errors ({len(errors)}): " + " | ".join(errors))
-                        messagebox.showwarning("Sync finished with warnings", "\n".join(errors))
+                        full = [e for e in errors if e.startswith("not enough space on the iPod")]
+                        other = [e for e in errors if e not in full]
+                        lines = []
+                        if full:
+                            lines.append(
+                                f"The iPod filled up, so {len(full)} song(s) weren't copied. "
+                                f"The {added} song(s) that fit are on the iPod and play normally. "
+                                "Untick some music to make room for the rest."
+                            )
+                        lines += other[:10]
+                        if len(other) > 10:
+                            lines.append(f"\u2026and {len(other) - 10} more")
+                        messagebox.showwarning("Sync finished with warnings", "\n\n".join(lines))
                     if cancelled:
                         status = f"Sync cancelled — {added} track(s) were saved before stopping."
                     else:
