@@ -3975,7 +3975,14 @@ class MainApp(tk.Tk):
         change, and every few seconds anyway to catch the free space
         changing, so the number follows each tick as it happens."""
         try:
-            if self._device_view_active and self.ipod_mountpoint:
+            if self._device_view_active and self.ipod_mountpoint and self._ipod_job_running():
+                # Mid-sync the iPod's free space already includes the songs
+                # copied so far, but its song list doesn't yet, so they'd
+                # be counted twice. Hold off until the sync finishes.
+                self._space_meter_sig = None
+                self.space_meter_label.configure(foreground="")
+                self.space_meter_var.set("Syncing\u2026 space updates when it's done")
+            elif self._device_view_active and self.ipod_mountpoint:
                 sig = (
                     frozenset(self._persistent_table_selection),
                     frozenset(self._selected_albums),
@@ -8185,6 +8192,36 @@ class MainApp(tk.Tk):
                 return
 
         playlist_names_by_track_id = playlist_names_by_track_id or {}
+
+        # Never start a sync that won't fit (every sync path ends here,
+        # after songs already on the iPod were dropped above).
+        need = 0
+        for r in rows:
+            size = r["size_bytes"]
+            if not size:
+                try:
+                    size = os.path.getsize(r["filepath"])
+                except (OSError, TypeError):
+                    size = 0
+            need += size
+        try:
+            free = shutil.disk_usage(self.ipod_mountpoint).free
+        except OSError:
+            free = None
+        if free is not None and free - need < self.SPACE_HEADROOM:
+            room = max(free - self.SPACE_HEADROOM, 0)
+            applog.log(f"SYNC: not started, needs {format_bytes(need)} but only {format_bytes(room)} fits")
+            if not silent:
+                messagebox.showwarning(
+                    "Not Enough Space",
+                    f"These {len(rows)} song(s) need {format_bytes(need)}, but "
+                    f"{self.ipod_label or 'the iPod'} only has room for {format_bytes(room)}. "
+                    f"Untick about {format_bytes(need - room)} of music and sync again.\n\n"
+                    "Nothing was copied.",
+                )
+            else:
+                self.status_var.set("Auto-sync skipped: not enough space on the iPod.")
+            return
 
         self.progress.configure(mode="determinate", maximum=max(len(rows), 1), value=0)
         skip_note = f" ({len(already_there)} already on the device, skipped)" if already_there else ""
